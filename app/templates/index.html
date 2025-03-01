@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Media Renamer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Media Renamer</h1>
+        
+        <div class="panel">
+            <h2>Media Details</h2>
+            <div class="mode-toggle">
+                <label><input type="radio" name="mode" value="search" checked onchange="toggleMode()"> Search OMDB</label>
+                <label><input type="radio" name="mode" value="manual" onchange="toggleMode()"> Manual Entry</label>
+            </div>
+            
+            <div id="searchSection" class="search-section">
+                <div class="autocomplete">
+                    <input type="text" id="searchQuery" placeholder="Enter media title">
+                    <div id="suggestions" class="suggestions"></div>
+                </div>
+                <button onclick="searchMovie()">Search</button>
+            </div>
+            
+            <div id="manualSection" class="manual-section" style="display: none;">
+                <input type="text" id="manualTitle" placeholder="Enter title">
+                <input type="number" id="manualYear" placeholder="Year" min="1900" max="9999">
+                <button onclick="setManualMedia()">Set Media</button>
+            </div>
+            
+            <div id="searchResults" class="results"></div>
+            
+            <div id="episodeSection" class="episode-section" style="display: none;">
+                <h3>Episode Details</h3>
+                <input type="number" id="season" placeholder="Season" min="1">
+                <input type="number" id="episode" placeholder="Episode" min="1">
+                <button onclick="getEpisodeDetails()">Get Episode</button>
+                <div id="episodeResults"></div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <h2>Rename Folder</h2>
+            <div class="rename-section">
+                <div class="folder-select">
+                    <select id="folderPath" onchange="updateRenameButton()">
+                        <option value="">Select a folder</option>
+                    </select>
+                    <button onclick="loadFolders()">Refresh Folders</button>
+                </div>
+                <div id="folderStatus" class="folder-status"></div>
+                <button onclick="renameFiles()" id="renameBtn" disabled>Rename Folder</button>
+            </div>
+            <div id="renameStatus" class="status"></div>
+        </div>
+        
+        <div class="panel">
+            <h2>Move Folder</h2>
+            <div class="move-section">
+                <select id="moveFolder" disabled>
+                    <option value="">Select renamed folder</option>
+                </select>
+                <select id="destination">
+                    <option value="">Select destination</option>
+                    <option value="movie">Movies</option>
+                    <option value="show">Shows</option>
+                </select>
+                <button onclick="moveFolder()" id="moveBtn" disabled>Move Folder</button>
+            </div>
+            <div id="moveStatus" class="status"></div>
+        </div>
+    </div>
+
+    <script>
+        let selectedMedia = null;
+        let episodeData = null;
+        let renamedFolder = null;
+        let timeoutId = null;
+
+        const searchInput = document.getElementById('searchQuery');
+        searchInput.addEventListener('input', function() {
+            clearTimeout(timeoutId);
+            timeoutId = setTimeout(getSuggestions, 300);
+        });
+
+        searchInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                searchMovie();
+            }
+        });
+
+        window.onload = loadFolders;
+
+        function toggleMode() {
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            document.getElementById('searchSection').style.display = mode === 'search' ? 'block' : 'none';
+            document.getElementById('manualSection').style.display = mode === 'manual' ? 'block' : 'none';
+            selectedMedia = null;
+            episodeData = null;
+            renamedFolder = null;
+            document.getElementById('searchResults').innerHTML = '';
+            document.getElementById('episodeSection').style.display = 'none';
+            document.getElementById('moveFolder').innerHTML = '<option value="">Select renamed folder</option>';
+            updateButtons();
+        }
+
+        async function loadFolders() {
+            const response = await fetch('/folders');
+            const data = await response.json();
+            const folderSelect = document.getElementById('folderPath');
+            const folderStatus = document.getElementById('folderStatus');
+            
+            folderSelect.innerHTML = '<option value="">Select a folder</option>';
+            
+            if (data.success && data.folders.length > 0) {
+                data.folders.forEach(folder => {
+                    const option = document.createElement('option');
+                    option.value = folder;
+                    option.textContent = folder;
+                    folderSelect.appendChild(option);
+                });
+                folderStatus.innerHTML = '<p>Folders loaded</p>';
+            } else {
+                folderStatus.innerHTML = `<p class="error">${data.error || 'No folders found'}</p>`;
+            }
+            updateButtons();
+        }
+
+        async function getSuggestions() {
+            const query = searchInput.value;
+            if (query.length < 2) {
+                document.getElementById('suggestions').innerHTML = '';
+                return;
+            }
+
+            const response = await fetch('/search_suggestions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `query=${encodeURIComponent(query)}`
+            });
+            const data = await response.json();
+            
+            const suggestionsDiv = document.getElementById('suggestions');
+            if (data.success && data.suggestions.length > 0) {
+                suggestionsDiv.innerHTML = data.suggestions.map(s => `
+                    <div class="suggestion" onclick="selectSuggestion('${s.title}')">
+                        ${s.title} (${s.year}) - ${s.type}
+                    </div>
+                `).join('');
+            } else {
+                suggestionsDiv.innerHTML = '';
+            }
+        }
+
+        function selectSuggestion(title) {
+            searchInput.value = title;
+            document.getElementById('suggestions').innerHTML = '';
+            searchMovie();
+        }
+
+        async function searchMovie() {
+            const query = document.getElementById('searchQuery').value;
+            const response = await fetch('/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `query=${encodeURIComponent(query)}`
+            });
+            const data = await response.json();
+            
+            const resultsDiv = document.getElementById('searchResults');
+            const episodeSection = document.getElementById('episodeSection');
+            
+            if (data.success) {
+                selectedMedia = data;
+                resultsDiv.innerHTML = `
+                    <div class="result-card">
+                        <h3>${data.title} (${data.year})</h3>
+                        <p>Type: ${data.type}</p>
+                        <p>Genre: ${data.metadata.Genre || 'N/A'}</p>
+                        <p>IMDb: ${data.metadata.imdbRating || 'N/A'}</p>
+                    </div>
+                `;
+                episodeSection.style.display = data.is_series ? 'block' : 'none';
+                updateButtons();
+            } else {
+                resultsDiv.innerHTML = '<p class="error">Media not found</p>';
+                episodeSection.style.display = 'none';
+                updateButtons();
+            }
+            document.getElementById('suggestions').innerHTML = '';
+        }
+
+        function setManualMedia() {
+            const title = document.getElementById('manualTitle').value;
+            const year = document.getElementById('manualYear').value;
+            
+            if (!title || !year) {
+                document.getElementById('searchResults').innerHTML = '<p class="error">Please enter both title and year</p>';
+                return;
+            }
+
+            selectedMedia = {
+                title: title,
+                year: year,
+                type: 'movie',
+                is_series: false,
+                metadata: { Title: title, Year: year }
+            };
+            
+            document.getElementById('searchResults').innerHTML = `
+                <div class="result-card">
+                    <h3>${title} (${year})</h3>
+                    <p>Type: movie (manual entry)</p>
+                </div>
+            `;
+            document.getElementById('episodeSection').style.display = 'block';
+            updateButtons();
+        }
+
+        async function getEpisodeDetails() {
+            const season = document.getElementById('season').value;
+            const episode = document.getElementById('episode').value;
+            
+            if (!season || !episode) {
+                document.getElementById('episodeResults').innerHTML = '<p class="error">Please enter season and episode</p>';
+                return;
+            }
+
+            if (document.querySelector('input[name="mode"]:checked').value === 'manual') {
+                selectedMedia.is_series = true;
+                episodeData = {
+                    Title: `${selectedMedia.title} S${season.padStart(2, '0')}E${episode.padStart(2, '0')}`,
+                    Season: season,
+                    Episode: episode
+                };
+                document.getElementById('episodeResults').innerHTML = `
+                    <div class="result-card">
+                        <h4>${episodeData.Title}</h4>
+                        <p>Season ${season}, Episode ${episode}</p>
+                        <p>(Manual entry)</p>
+                    </div>
+                `;
+                updateButtons();
+            } else {
+                const response = await fetch('/get_episode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `title=${encodeURIComponent(selectedMedia.title)}&season=${season}&episode=${episode}`
+                });
+                const data = await response.json();
+                
+                const episodeResults = document.getElementById('episodeResults');
+                if (data.success) {
+                    episodeData = data.metadata;
+                    episodeResults.innerHTML = `
+                        <div class="result-card">
+                            <h4>${data.metadata.Title}</h4>
+                            <p>Season ${season}, Episode ${episode}</p>
+                            <p>Released: ${data.metadata.Released || 'N/A'}</p>
+                        </div>
+                    `;
+                    updateButtons();
+                } else {
+                    episodeResults.innerHTML = '<p class="error">Episode not found</p>';
+                    updateButtons();
+                }
+            }
+        }
+
+        function updateButtons() {
+            const renameBtn = document.getElementById('renameBtn');
+            const moveBtn = document.getElementById('moveBtn');
+            const folderPath = document.getElementById('folderPath').value;
+            const moveFolder = document.getElementById('moveFolder');
+            const destination = document.getElementById('destination').value;
+            const isSeries = selectedMedia && selectedMedia.is_series;
+            const hasEpisode = episodeData !== null;
+
+            renameBtn.disabled = !(folderPath && selectedMedia && (!isSeries || (isSeries && hasEpisode)));
+            moveFolder.disabled = !renamedFolder;
+            moveBtn.disabled = !(renamedFolder && destination);
+        }
+
+        async function renameFiles() {
+            const folderPath = document.getElementById('folderPath').value;
+            const season = document.getElementById('season').value;
+            const episode = document.getElementById('episode').value;
+            
+            const formData = new URLSearchParams();
+            formData.append('folder_path', folderPath);
+            formData.append('title', selectedMedia.title);
+            formData.append('year', selectedMedia.year);
+            formData.append('is_series', selectedMedia.is_series);
+            formData.append('metadata', JSON.stringify(episodeData || selectedMedia.metadata));
+            if (selectedMedia.is_series && season && episode) {
+                formData.append('season', season);
+                formData.append('episode', episode);
+            }
+
+            const response = await fetch('/rename', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: formData
+            });
+            const data = await response.json();
+            
+            const statusDiv = document.getElementById('renameStatus');
+            if (data.success) {
+                renamedFolder = data.new_path;
+                statusDiv.innerHTML = `<p class="success">Renamed to: ${data.new_path}</p>`;
+                const moveSelect = document.getElementById('moveFolder');
+                moveSelect.innerHTML = `<option value="${data.new_path}">${data.new_path}</option>`;
+                document.getElementById('destination').value = data.is_series ? 'show' : 'movie';
+            } else {
+                statusDiv.innerHTML = `<p class="error">Error: ${data.error}</p>`;
+            }
+            updateButtons();
+        }
+
+        async function moveFolder() {
+            const folderPath = document.getElementById('moveFolder').value;
+            const destination = document.getElementById('destination').value;
+            
+            const formData = new URLSearchParams();
+            formData.append('folder_path', folderPath);
+            formData.append('destination', destination);
+
+            const response = await fetch('/move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: formData
+            });
+            const data = await response.json();
+            
+            const statusDiv = document.getElementById('moveStatus');
+            if (data.success) {
+                statusDiv.innerHTML = `<p class="success">Moved to: ${data.new_path}</p>`;
+                renamedFolder = null;
+                document.getElementById('moveFolder').innerHTML = '<option value="">Select renamed folder</option>';
+                document.getElementById('destination').value = '';
+                loadFolders();  // Refresh folder list
+            } else {
+                statusDiv.innerHTML = `<p class="error">Error: ${data.error}</p>`;
+            }
+            updateButtons();
+        }
+    </script>
+</body>
+</html>

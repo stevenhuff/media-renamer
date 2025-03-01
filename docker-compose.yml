@@ -1,0 +1,10 @@
+version: '3'
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - C:/Test:/media
+    environment:
+      - OMDB_API_KEY=66b7d262
