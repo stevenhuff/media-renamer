@@ -1,8 +1,10 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 import requests
 import os
 import re
 import shutil
+from queue import Queue
+from threading import Lock
 
 app = Flask(__name__)
 
@@ -13,7 +15,7 @@ if not OMDB_API_KEY:
     raise ValueError("OMDB_API_KEY environment variable is not set")
 
 # Base directories
-BASE_DIR = '/media/queue/watch'          # Updated mount point for consistency
+BASE_DIR = '/media/queue'          # Updated mount point for consistency
 MOVIE_DIR = '/media/movies'
 SHOW_DIR = '/media/shows'
 
@@ -22,9 +24,26 @@ for dir_path in [MOVIE_DIR, SHOW_DIR]:
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
 
+# SSE event queue
+event_queue = Queue()
+event_lock = Lock()
+
+def send_event(event_type, message):
+    with event_lock:
+        event_queue.put(f"data: {event_type}:{message}\n\n")
+
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/events')
+def sse():
+    def event_stream():
+        while True:
+            message = event_queue.get()
+            yield message
+            event_queue.task_done()
+    return Response(event_stream(), mimetype="text/event-stream")
 
 @app.route('/folders', methods=['GET'])
 def get_folders():
@@ -37,6 +56,78 @@ def get_folders():
         return jsonify({'success': True, 'folders': folders})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e), 'folders': []})
+
+@app.route('/files', methods=['POST'])
+def get_files():
+    folder_name = request.form['folder_name']
+    folder_path = os.path.join(BASE_DIR, folder_name)
+    try:
+        if not os.path.exists(folder_path):
+            return jsonify({'success': False, 'error': f"Folder {folder_path} does not exist", 'files': []})
+        
+        files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
+        return jsonify({'success': True, 'files': files})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e), 'files': []})
+
+@app.route('/delete', methods=['POST'])
+def delete_files():
+    folder_name = request.form['folder_name']
+    files_to_delete = request.form.getlist('files[]')
+    folder_path = os.path.join(BASE_DIR, folder_name)
+    
+    try:
+        if not os.path.exists(folder_path):
+            error_msg = f"Folder {folder_path} does not exist"
+            send_event('delete_error', error_msg)
+            return jsonify({'success': False, 'error': error_msg})
+        
+        deleted_files = []
+        for filename in files_to_delete:
+            file_path = os.path.join(folder_path, filename)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                deleted_files.append(filename)
+                send_event('delete_success', f"Deleted {filename} from {folder_path}")
+            else:
+                send_event('delete_error', f"File {filename} not found in {folder_path}")
+        
+        return jsonify({'success': True, 'deleted': deleted_files})
+    except Exception as e:
+        send_event('delete_error', str(e))
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/extras', methods=['POST'])
+def move_to_extras():
+    folder_name = request.form['folder_name']
+    files_to_move = request.form.getlist('files[]')
+    folder_path = os.path.join(BASE_DIR, folder_name)
+    extras_path = os.path.join(folder_path, 'Extras')
+    
+    try:
+        if not os.path.exists(folder_path):
+            error_msg = f"Folder {folder_path} does not exist"
+            send_event('extras_error', error_msg)
+            return jsonify({'success': False, 'error': error_msg})
+        
+        if not os.path.exists(extras_path):
+            os.makedirs(extras_path)
+        
+        moved_files = []
+        for filename in files_to_move:
+            src_path = os.path.join(folder_path, filename)
+            dest_path = os.path.join(extras_path, filename)
+            if os.path.isfile(src_path):
+                shutil.move(src_path, dest_path)
+                moved_files.append(filename)
+                send_event('extras_success', f"Moved {filename} to Extras in {folder_path}")
+            else:
+                send_event('extras_error', f"File {filename} not found in {folder_path}")
+        
+        return jsonify({'success': True, 'moved': moved_files})
+    except Exception as e:
+        send_event('extras_error', str(e))
+        return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/search_suggestions', methods=['POST'])
 def search_suggestions():
@@ -115,8 +206,11 @@ def rename_files():
     
     try:
         if not os.path.exists(folder_path):
-            return jsonify({'success': False, 'error': f"Folder {folder_path} does not exist"})
+            error_msg = f"Folder {folder_path} does not exist"
+            send_event('rename_error', error_msg)
+            return jsonify({'success': False, 'error': error_msg})
             
+        send_event('rename_start', f"Renaming {folder_path}")
         clean_title = re.sub(r'[^\w\s-]', '', title).strip()
         
         if is_series and season and episode:
@@ -170,8 +264,10 @@ def rename_files():
                 new_file_path = os.path.join(final_path, new_filename)
                 os.rename(file_path, new_file_path)
                 
+        send_event('rename_success', f"Renamed to: {final_path}")
         return jsonify({'success': True, 'new_path': final_path, 'is_series': is_series})
     except Exception as e:
+        send_event('rename_error', str(e))
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/move', methods=['POST'])
@@ -181,21 +277,30 @@ def move_folder():
     
     try:
         if not os.path.exists(folder_path):
-            return jsonify({'success': False, 'error': f"Source folder {folder_path} does not exist"})
+            error_msg = f"Source folder {folder_path} does not exist"
+            send_event('move_error', error_msg)
+            return jsonify({'success': False, 'error': error_msg})
         
+        send_event('move_start', f"Moving {folder_path}")
         if destination == 'movie':
             dest_path = os.path.join(MOVIE_DIR, os.path.basename(folder_path))
         elif destination == 'show':
             dest_path = os.path.join(SHOW_DIR, os.path.basename(folder_path))
         else:
-            return jsonify({'success': False, 'error': 'Invalid destination'})
+            error_msg = 'Invalid destination'
+            send_event('move_error', error_msg)
+            return jsonify({'success': False, 'error': error_msg})
         
         if os.path.exists(dest_path):
-            return jsonify({'success': False, 'error': f"Destination {dest_path} already exists"})
+            error_msg = f"Destination {dest_path} already exists"
+            send_event('move_error', error_msg)
+            return jsonify({'success': False, 'error': error_msg})
         
         shutil.move(folder_path, dest_path)
+        send_event('move_success', f"Moved to: {dest_path}")
         return jsonify({'success': True, 'new_path': dest_path})
     except Exception as e:
+        send_event('move_error', str(e))
         return jsonify({'success': False, 'error': str(e)})
 
 if __name__ == '__main__':

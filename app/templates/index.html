@@ -44,12 +44,15 @@
             <h2>Rename Folder</h2>
             <div class="rename-section">
                 <div class="folder-select">
-                    <select id="folderPath" onchange="updateRenameButton()">
+                    <select id="folderPath" onchange="loadFiles()">
                         <option value="">Select a folder</option>
                     </select>
                     <button onclick="loadFolders()">Refresh Folders</button>
                 </div>
                 <div id="folderStatus" class="folder-status"></div>
+                <div id="fileList" class="file-list"></div>
+                <button onclick="deleteFiles()" id="deleteBtn" disabled>Delete Selected</button>
+                <button onclick="moveToExtras()" id="extrasBtn" disabled>Move to Extras</button>
                 <button onclick="renameFiles()" id="renameBtn" disabled>Rename Folder</button>
             </div>
             <div id="renameStatus" class="status"></div>
@@ -69,6 +72,11 @@
                 <button onclick="moveFolder()" id="moveBtn" disabled>Move Folder</button>
             </div>
             <div id="moveStatus" class="status"></div>
+        </div>
+        
+        <div class="panel">
+            <h2>Status</h2>
+            <div id="statusWidget" class="status-widget"></div>
         </div>
     </div>
 
@@ -90,7 +98,35 @@
             }
         });
 
-        window.onload = loadFolders;
+        window.onload = function() {
+            loadFolders();
+            setupEventSource();
+        };
+
+        function setupEventSource() {
+            const source = new EventSource('/events');
+            const statusWidget = document.getElementById('statusWidget');
+            
+            source.onmessage = function(event) {
+                const [eventType, message] = event.data.split(':', 2);
+                const p = document.createElement('p');
+                p.textContent = message;
+                
+                if (eventType.includes('error')) {
+                    p.className = 'error';
+                } else if (eventType.includes('success')) {
+                    p.className = 'success';
+                }
+                
+                statusWidget.insertBefore(p, statusWidget.firstChild);
+                while (statusWidget.children.length > 10) {
+                    statusWidget.removeChild(statusWidget.lastChild);
+                }
+                if (eventType === 'delete_success' || eventType === 'extras_success') {
+                    loadFiles();  // Refresh file list after deletion or move to extras
+                }
+            };
+        }
 
         function toggleMode() {
             const mode = document.querySelector('input[name="mode"]:checked').value;
@@ -102,6 +138,7 @@
             document.getElementById('searchResults').innerHTML = '';
             document.getElementById('episodeSection').style.display = 'none';
             document.getElementById('moveFolder').innerHTML = '<option value="">Select renamed folder</option>';
+            document.getElementById('fileList').innerHTML = '';
             updateButtons();
         }
 
@@ -125,6 +162,103 @@
                 folderStatus.innerHTML = `<p class="error">${data.error || 'No folders found'}</p>`;
             }
             updateButtons();
+        }
+
+        async function loadFiles() {
+            const folderPath = document.getElementById('folderPath').value;
+            const fileList = document.getElementById('fileList');
+            fileList.innerHTML = '';
+            
+            if (!folderPath) {
+                updateButtons();
+                return;
+            }
+            
+            const formData = new URLSearchParams();
+            formData.append('folder_name', folderPath);
+            
+            const response = await fetch('/files', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: formData
+            });
+            const data = await response.json();
+            
+            if (data.success && data.files.length > 0) {
+                data.files.forEach(file => {
+                    const div = document.createElement('div');
+                    div.className = 'file-item';
+                    div.innerHTML = `
+                        <input type="checkbox" name="deleteFile" value="${file}">
+                        <label>Delete</label>
+                        <input type="checkbox" name="extrasFile" value="${file}">
+                        <label>Extras</label>
+                        <span>${file}</span>
+                    `;
+                    fileList.appendChild(div);
+                });
+            } else {
+                fileList.innerHTML = `<p>${data.error || 'No files found'}</p>`;
+            }
+            updateButtons();
+        }
+
+        async function deleteFiles() {
+            const folderPath = document.getElementById('folderPath').value;
+            const checkboxes = document.querySelectorAll('#fileList input[name="deleteFile"]:checked');
+            const filesToDelete = Array.from(checkboxes).map(cb => cb.value);
+            
+            if (filesToDelete.length === 0) {
+                document.getElementById('renameStatus').innerHTML = '<p class="error">No files selected for deletion</p>';
+                return;
+            }
+            
+            const formData = new URLSearchParams();
+            formData.append('folder_name', folderPath);
+            filesToDelete.forEach(file => formData.append('files[]', file));
+            
+            const response = await fetch('/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: formData
+            });
+            const data = await response.json();
+            
+            const statusDiv = document.getElementById('renameStatus');
+            if (data.success) {
+                statusDiv.innerHTML = `<p class="success">Deleted ${data.deleted.length} file(s)</p>`;
+            } else {
+                statusDiv.innerHTML = `<p class="error">Error: ${data.error}</p>`;
+            }
+        }
+
+        async function moveToExtras() {
+            const folderPath = document.getElementById('folderPath').value;
+            const checkboxes = document.querySelectorAll('#fileList input[name="extrasFile"]:checked');
+            const filesToMove = Array.from(checkboxes).map(cb => cb.value);
+            
+            if (filesToMove.length === 0) {
+                document.getElementById('renameStatus').innerHTML = '<p class="error">No files selected for Extras</p>';
+                return;
+            }
+            
+            const formData = new URLSearchParams();
+            formData.append('folder_name', folderPath);
+            filesToMove.forEach(file => formData.append('files[]', file));
+            
+            const response = await fetch('/extras', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: formData
+            });
+            const data = await response.json();
+            
+            const statusDiv = document.getElementById('renameStatus');
+            if (data.success) {
+                statusDiv.innerHTML = `<p class="success">Moved ${data.moved.length} file(s) to Extras</p>`;
+            } else {
+                statusDiv.innerHTML = `<p class="error">Error: ${data.error}</p>`;
+            }
         }
 
         async function getSuggestions() {
@@ -271,13 +405,19 @@
         function updateButtons() {
             const renameBtn = document.getElementById('renameBtn');
             const moveBtn = document.getElementById('moveBtn');
+            const deleteBtn = document.getElementById('deleteBtn');
+            const extrasBtn = document.getElementById('extrasBtn');
             const folderPath = document.getElementById('folderPath').value;
             const moveFolder = document.getElementById('moveFolder');
             const destination = document.getElementById('destination').value;
             const isSeries = selectedMedia && selectedMedia.is_series;
             const hasEpisode = episodeData !== null;
+            const deleteSelected = document.querySelectorAll('#fileList input[name="deleteFile"]:checked').length > 0;
+            const extrasSelected = document.querySelectorAll('#fileList input[name="extrasFile"]:checked').length > 0;
 
             renameBtn.disabled = !(folderPath && selectedMedia && (!isSeries || (isSeries && hasEpisode)));
+            deleteBtn.disabled = !(folderPath && deleteSelected);
+            extrasBtn.disabled = !(folderPath && extrasSelected);
             moveFolder.disabled = !renamedFolder;
             moveBtn.disabled = !(renamedFolder && destination);
         }
@@ -312,6 +452,7 @@
                 const moveSelect = document.getElementById('moveFolder');
                 moveSelect.innerHTML = `<option value="${data.new_path}">${data.new_path}</option>`;
                 document.getElementById('destination').value = data.is_series ? 'show' : 'movie';
+                document.getElementById('fileList').innerHTML = '';
             } else {
                 statusDiv.innerHTML = `<p class="error">Error: ${data.error}</p>`;
             }
@@ -339,7 +480,7 @@
                 renamedFolder = null;
                 document.getElementById('moveFolder').innerHTML = '<option value="">Select renamed folder</option>';
                 document.getElementById('destination').value = '';
-                loadFolders();  // Refresh folder list
+                loadFolders();
             } else {
                 statusDiv.innerHTML = `<p class="error">Error: ${data.error}</p>`;
             }
